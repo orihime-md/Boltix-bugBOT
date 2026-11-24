@@ -85,8 +85,7 @@ let batchCount  = 0;
 let dayStamp    = new Date().toDateString();
 let sendReadyAt = 0;
 
-// Set when a pairing was PROMOTED to the main session — ensures the
-// post-pairing anti-ban warm-up applies even though creds.json exists.
+// Set when a pairing was PROMOTED to the main session.
 let pendingFreshPairing = false;
 
 const inboundLedger = new Map();
@@ -417,7 +416,7 @@ _Owner-only commands._ Numbers must be on WhatsApp.`);
         if (!isOwner(m)) { await reply('❌ Not authorized.'); break; }
         rollDay();
         const warm = Date.now() < sendReadyAt
-          ? `⏳ warm-up: ${Math.ceil((sendReadyAt - Date.now()) / 1000)}s left`
+          ? `⏳ warm-up: ${Math.ceil((sendReadyAt - Date.now() / 1000))}s left`
           : '✅ warm-up done';
         await reply(
 `📊 *Anti-ban status*
@@ -480,20 +479,17 @@ ${warm}`);
 }
 
 /* ============================================================
-   PAIRING — long-lived session registry + dedicated pairing socket
+   PAIRING — dedicated pairing socket, ONE code per generation
    ------------------------------------------------------------
-   The pairing session is kept ALIVE until it reaches a terminal
-   state: open (fully linked) | failed | cancelled | expired.
-   In-flight states like `restarting` (WhatsApp dropped the
-   pre-auth socket) and `linking` (code accepted, handshake
-   finishing) do NOT end the session.
-
-   /api/pair is NON-BLOCKING: it creates the session and returns
-   immediately. The page then polls /api/pair/status (free) —
-   which also refreshes the idle TTL — and the pairing code
-   appears there the moment Baileys issues it. This removes the
-   long-lived HTTP request that caused "Network error" on hosts
-   like Render (proxy/browser timeouts at ~30s).
+   Key rules (learned the hard way):
+   1. Request the pairing code EXACTLY ONCE per socket
+      generation. WhatsApp pushes a fresh QR every ~20s while
+      unpaired, but re-requesting the code INVALIDATES the old
+      one → "couldn't link device, generate a new code".
+   2. The generic main socket is STOPPED while a pairing session
+      is live — only one registration at a time.
+   3. The session stays alive (restarting / linking) until it is
+      fully linked (open) or terminally failed.
 ============================================================ */
 const PAIRING_TMP_DIR = path.join(__dirname, 'pairing_tmp');
 
@@ -506,7 +502,7 @@ const MAX_RECORDS = 100;
 
 const pairings = new Map();       // id -> pairing
 const activeByNumber = new Map(); // number -> id (only non-terminal)
-const pairingSockets = new Map(); // id -> { sock, dir, number, restarts, code, codeRequested, codeWaiters, cancelled, retryCount }
+const pairingSockets = new Map(); // id -> rec
 
 function withTimeout(promise, ms, message) {
   let timer;
@@ -583,17 +579,13 @@ function applyCode(pairing, code) {
 }
 
 const DEFAULT_MESSAGES = {
-  requesting:  'Starting a WhatsApp connection — your pairing code will appear here in a few seconds…',
-  ready:       'WhatsApp connection is ready…',
-  connecting:  'Connecting to WhatsApp…',
+  requesting:  'Starting a WhatsApp connection — your code will appear here in a few seconds…',
   code_ready:  'Pairing code active. Enter it on WhatsApp → Linked devices → Link with phone number instead.',
   restarting:  'WhatsApp reset the connection — keep this page open, the session is still alive…',
   linking:     'Code accepted. Finishing the link with WhatsApp…',
   open:        'Device paired successfully.'
 };
 
-/* Called from the pairing-socket layer whenever the socket behind
-   a pairing changes. Terminal sessions never come back to life. */
 function updatePairingStatus(status, details = {}, pairingId = '') {
   if (!pairingId) return;
   const pairing = pairings.get(pairingId);
@@ -614,7 +606,7 @@ function updatePairingStatus(status, details = {}, pairingId = '') {
 
   pairing.status = status;
   touch(pairing);
-  if (status === 'restarting') pairing.error = null; // transient, not an error
+  if (status === 'restarting') pairing.error = null;
 }
 
 /* ---------- dedicated pairing socket lifecycle ---------- */
@@ -629,35 +621,29 @@ function receivePairingCode(pairingId, code) {
     applyCode(pairing, code);
     if (pairing.status === 'requesting' || pairing.status === 'restarting') {
       pairing.status = 'code_ready';
-    }
+      }
     touch(pairing);
   }
 
   for (const w of rec.codeWaiters.splice(0)) w.resolve(code);
 }
 
-/* Request a pairing code — WITH RETRY. A transient hiccup before
-   the code is issued should never leave a session stuck forever. */
 async function requestPairingCode(rec, pairingId, attempt = 0) {
   const pairing = pairings.get(pairingId);
   if (!pairing || isTerminal(pairing) || rec.cancelled) return;
   try {
     const code = String(await rec.sock.requestPairingCode(rec.number) || '').trim().toUpperCase();
     if (code) {
-      console.log('[pair] 🔑 code generated (code not logged)');
+      console.log('[pair] 🔑 code issued (one per connection — code not logged)');
       receivePairingCode(pairingId, code);
     }
   } catch (e) {
     console.error(`[pair] requestPairingCode failed (attempt ${attempt + 1}):`, e?.message);
     if (rec.cancelled) return;
-    // Socket close handler may recreate the socket — if it doesn't
-    // in time, retry ourselves with backoff.
     if (attempt < 4) {
       setTimeout(() => {
         const cur = pairingSockets.get(pairingId);
-        if (cur === rec && !rec.cancelled) {
-          requestPairingCode(rec, pairingId, attempt + 1);
-        }
+        if (cur === rec && !rec.cancelled) requestPairingCode(rec, pairingId, attempt + 1);
       }, 4000 + attempt * 3000);
     } else {
       updatePairingStatus('failed', {
@@ -693,8 +679,7 @@ async function createPairingConnection(rec, pairingId) {
   s.ev.on('creds.update', saveCreds);
 
   s.ev.on('connection.update', async (u) => {
-    // Ignore events from a STALE socket after a restart/recreate.
-    if (rec.sock !== s || rec.cancelled) return;
+    if (rec.sock !== s || rec.cancelled) return; // stale socket events
 
     const { connection, lastDisconnect, qr } = u;
 
@@ -702,17 +687,17 @@ async function createPairingConnection(rec, pairingId) {
       const pairing = pairings.get(pairingId);
       if (!pairing || isTerminal(pairing) || rec.cancelled) return;
 
-      if (!rec.codeRequested) {
-        rec.codeRequested = true;
-        await requestPairingCode(rec, pairingId);
-      } else if (rec.code) {
-        // Socket restarted pre-auth → previous code is stale. Refresh it.
+      /* 🔑 THE FIX: request the code ONCE per socket generation.
+         WhatsApp re-pushes a QR every ~20s while unpaired, but
+         re-requesting the code each time invalidates the code the
+         user is about to type ("couldn't link device"). */
+      if (rec.generation !== rec.codeGeneration) {
+        rec.codeGeneration = rec.generation;
         await requestPairingCode(rec, pairingId);
       }
     }
 
     if (connection === 'open') {
-      // Phone accepted the code and WhatsApp finished the handshake.
       await promotePairing(pairingId);
       return;
     }
@@ -733,8 +718,6 @@ async function createPairingConnection(rec, pairingId) {
 
       const isSessionRestart = code === 515 || code === 428;
       if (isSessionRestart) {
-        // 428/515 during linking is the NORMAL flow after the phone
-        // accepts the code — WhatsApp replaces the pre-auth socket.
         const pairing = pairings.get(pairingId);
         if (pairing && (pairing.status === 'code_ready' || pairing.status === 'linking')) {
           updatePairingStatus('linking', {}, pairingId);
@@ -764,7 +747,7 @@ async function createPairingConnection(rec, pairingId) {
 async function recreatePairingSocket(rec, pairingId) {
   if (rec.cancelled) return;
   try {
-    // Re-use the SAME temp auth dir so we don't lose registration.
+    rec.generation = (rec.generation || 0) + 1; // new socket → may need a fresh code
     await createPairingConnection(rec, pairingId);
   } catch (e) {
     console.error('[pair] recreate failed:', e?.message);
@@ -776,6 +759,13 @@ async function recreatePairingSocket(rec, pairingId) {
   }
 }
 
+/* Restart the generic main socket if no pairing session is running. */
+function maybeRestartMain() {
+  if (connected) return;
+  if (pairingSockets.size > 0) return;
+  scheduleReconnect(3000);
+}
+
 function cleanupPairingSocket(pairingId) {
   const rec = pairingSockets.get(pairingId);
   if (!rec) return;
@@ -784,10 +774,9 @@ function cleanupPairingSocket(pairingId) {
   try { rec.sock?.end?.(new Error('pairing-cleanup')); } catch (_) {}
   pairingSockets.delete(pairingId);
   try { fs.rmSync(rec.dir, { recursive: true, force: true }); } catch (_) {}
+  maybeRestartMain();
 }
 
-/* Launch a fresh dedicated pairing socket. Cancels any other active
-   pairing first — only one pre-auth socket at a time. */
 async function pairingStart(number, pairingId) {
   for (const [otherId] of pairingSockets) {
     if (otherId !== pairingId) {
@@ -799,6 +788,24 @@ async function pairingStart(number, pairingId) {
     }
   }
 
+  /* 🔑 Only ONE registration at a time: stop the generic main
+     socket while the dedicated pairing socket runs. (This was the
+     second cause of link failures — two competing sockets.) */
+  try {
+    if (!connected && sock) {
+      sock.ev.removeAllListeners?.('connection.update');
+      sock.ev.removeAllListeners?.('messages.upsert');
+      sock.ev.removeAllListeners?.('creds.update');
+      sock.end?.(new Error('pairing-session-start'));
+    }
+  } catch (_) {}
+  if (!connected) {
+    sock = null;
+    qrText = null;
+    booting = false;
+    connState = 'pairing';
+  }
+
   const dir = path.join(PAIRING_TMP_DIR, pairingId);
   fs.mkdirSync(dir, { recursive: true });
 
@@ -807,17 +814,16 @@ async function pairingStart(number, pairingId) {
     sock: null,
     number,
     restarts: 0,
+    generation: 0,
+    codeGeneration: -1,   // code has NOT been requested for generation 0 yet
     code: null,
-    codeRequested: false,
     codeWaiters: [],
-    cancelled: false,
-    retryCount: 0
+    cancelled: false
   };
   pairingSockets.set(pairingId, rec);
 
   await createPairingConnection(rec, pairingId);
 
-  // Resolve with the FIRST code; the session lives on afterwards.
   return new Promise((resolve, reject) => {
     const r = pairingSockets.get(pairingId);
     if (!r) return reject(new Error('Pairing socket was cancelled.'));
@@ -826,18 +832,14 @@ async function pairingStart(number, pairingId) {
   });
 }
 
-/* Phone accepted the code → the temp session is a real WhatsApp
-   session. Promote it to the MAIN session and boot the bot. */
 async function promotePairing(pairingId) {
   const rec = pairingSockets.get(pairingId);
   const pairing = pairings.get(pairingId);
   if (!rec || !pairing || isTerminal(pairing)) return;
 
   updatePairingStatus('open', { message: 'Device paired successfully.' }, pairingId);
-
   console.log('[pair] promoting session to main bot');
 
-  // Stop any old main socket so exactly one device session runs.
   try { sock?.end?.(new Error('paired-via-web')); } catch (_) {}
   sock = null;
   connected = false;
@@ -845,24 +847,18 @@ async function promotePairing(pairingId) {
   qrText = null;
   connState = 'connecting';
 
-  // Copy the freshly-paired credentials into the main session dir.
   try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }); } catch (_) {}
   fs.mkdirSync(SESSION_DIR, { recursive: true });
   for (const f of fs.readdirSync(rec.dir)) {
     fs.copyFileSync(path.join(rec.dir, f), path.join(SESSION_DIR, f));
   }
 
-  // Anti-ban warm-up applies — this was a fresh pairing.
   pendingFreshPairing = true;
 
-  // Close the temporary socket; the main socket takes over from the
-  // promoted credentials.
-  cleanupPairingSocket(pairingId);
-
+  cleanupPairingSocket(pairingId);   // includes maybeRestartMain → start()
   scheduleReconnect(2000);
 }
 
-/* Expire sessions only after a long stretch of silence. */
 const sweeper = setInterval(() => {
   const now = Date.now();
   for (const pairing of pairings.values()) {
@@ -888,15 +884,17 @@ function scheduleReconnect(waitMs) {
 }
 
 async function start() {
+  // A pairing session owns the connection — don't spawn a competing socket.
+  if (pairingSockets.size > 0) {
+    console.log('[start] pairing session active — main socket deferred');
+    booting = false;
+    return;
+  }
   if (booting) return;
   booting = true;
 
   const freshSession = pendingFreshPairing || !fs.existsSync(path.join(SESSION_DIR, 'creds.json'));
 
-  // 🔧 Startup watchdog — SINGLE clean implementation. It never
-  // fires while a QR is on screen or a web pairing session is in
-  // flight (that's what was invalidating the QR every 60s by force-
-  // closing the socket and causing the "code 500" reconnect storm).
   const armStartupTimer = () => {
     if (startupTimer) clearTimeout(startupTimer);
     startupTimer = setTimeout(() => {
@@ -910,7 +908,6 @@ async function start() {
         scheduleReconnect(5000);
         return;
       }
-      // Still waiting on a QR / pairing — re-arm instead of killing.
       if (!connected) armStartupTimer();
     }, STARTUP_TIMEOUT_MS);
   };
@@ -939,12 +936,10 @@ async function start() {
     sock.ev.on('connection.update', (u) => {
       const { connection, lastDisconnect, qr } = u;
 
-      if (qr) {
+      if (qr && pairingSockets.size === 0) {
         qrText = qr;
-        // 🔧 A QR on screen means the socket is HEALTHY and waiting
-        // for a human scan — clear the watchdog so it isn't killed at 60s.
         if (startupTimer) { clearTimeout(startupTimer); startupTimer = null; }
-        booting = false; // waiting on a human now, not on the network
+        booting = false;
         if (connState !== 'waiting_qr') {
           connState = 'waiting_qr';
           console.log('[pair] QR available for scanning (connection stays alive until scanned)');
@@ -991,6 +986,11 @@ async function start() {
           return;
         }
 
+        if (pairingSockets.size > 0) {
+          connState = 'pairing';
+          return; // pairing socket owns the flow; it handles its own reconnects
+        }
+
         connState = 'reconnecting';
 
         const isSessionRestart = code === 515 || code === 428;
@@ -1033,8 +1033,6 @@ process.on('uncaughtException', e => {
 const app = express();
 app.use(express.json());
 
-// 🔧 FIXED: rate limiters defined BEFORE they are used below.
-// Closure over the attempt arrays declared near the top of the file.
 function makeLimiter(bucket, maxPerMin, message) {
   return (_req, res, next) => {
     const now = Date.now();
@@ -1095,15 +1093,14 @@ app.get('/api/state', (_req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({
     connected,
-    state: connState,
+    state: connState === 'pairing' ? 'connecting' : connState,
     user: connected ? maskJid(userJid) : null
   });
 });
 
-// 🔧 QR endpoint: uses the qrLimiter middleware (defined above).
 app.get('/api/qr', qrLimiter, async (_req, res) => {
   res.set('Cache-Control', 'no-store');
-  if (!qrText) return res.json({ qr: null, state: connState, connected });
+  if (!qrText || pairingSockets.size > 0) return res.json({ qr: null, state: connState, connected });
   try {
     res.json({
       qr: await QRCode.toDataURL(qrText, { margin: 1, width: 360 }),
@@ -1115,12 +1112,8 @@ app.get('/api/qr', qrLimiter, async (_req, res) => {
   }
 });
 
-/* ---------- pairing endpoints (session registry) ---------- */
+/* ---------- pairing endpoints ---------- */
 
-// 🔧 NON-BLOCKING. Starts (or resumes) a pairing session and
-// responds IMMEDIATELY with the session view. The page then polls
-// /api/pair/status — the pairing code arrives there within seconds.
-// This is what removes the "Network error" (long-held HTTP request).
 app.get('/api/pair', pairLimiter, async (req, res) => {
   if (connected) return res.status(400).json({ ok: false, error: 'Already connected.' });
 
@@ -1158,10 +1151,8 @@ app.get('/api/pair', pairLimiter, async (req, res) => {
   pairings.set(id, pairing);
   activeByNumber.set(number, id);
   prune();
-  console.log(`[pair] 🟡 session ${id} created — responding immediately, code via /api/pair/status`);
+  console.log(`[pair] 🟡 session ${id} created — code via /api/pair/status`);
 
-  // 🔧 Run the pairing handshake in the BACKGROUND. The request has
-  // already been answered, so proxy/browser timeouts can't break it.
   withTimeout(
     pairingStart(number, id),
     180000,
@@ -1184,13 +1175,9 @@ app.get('/api/pair', pairLimiter, async (req, res) => {
       cleanupPairingSocket(id);
     });
 
-  // Respond NOW — the page polls status for the code.
   return res.json(publicView(pairing));
 });
 
-// Poll session status. Polling itself keeps the session ALIVE, and
-// the session stays alive through 'restarting' / 'linking' — only
-// open/failed/cancelled/expired end it.
 app.get('/api/pair/status', (req, res) => {
   const id = String(req.query.id || '');
   const pairing = pairings.get(id);
@@ -1201,14 +1188,10 @@ app.get('/api/pair/status', (req, res) => {
     pairing.expiresAt = Math.min(Date.now() + IDLE_TTL_MS, pairing.createdAt + HARD_TTL_MS);
   }
   res.set('Cache-Control', 'no-store');
-  return res.json({
-    ...publicView(pairing),
-    connected
-  });
+  return res.json({ ...publicView(pairing), connected });
 });
 
-// Cancel a session.
-app.get('/api/pair/cancel', async (req, res) => {
+app.get('/api/pair/cancel', (req, res) => {
   const id = String(req.query.id || '');
   const pairing = pairings.get(id);
   if (!pairing) return res.status(404).json({ ok: false, error: 'Pairing session not found.' });
