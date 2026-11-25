@@ -1,0 +1,431 @@
+  <!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BOLTIX — Pair Your WhatsApp</title>
+<style>
+  :root {
+    --bg: #07080d;
+    --card: #101219;
+    --card2: #161926;
+    --line: #232739;
+    --text: #e8eaf2;
+    --muted: #8b91a7;
+    --accent: #6c8cff;
+    --good: #43d68a;
+    --warn: #f0a35e;
+    --bad: #f06e6e;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
+  body {
+    min-height: 100vh; background:
+      radial-gradient(1100px 500px at 50% -10%, #131a33 0%, var(--bg) 60%);
+    color: var(--text); display: flex; align-items: center;
+    justify-content: center; padding: 24px;
+  }
+  .shell { width: 100%; max-width: 460px; }
+
+  .brand { text-align: center; margin-bottom: 18px; }
+  .brand .logo {
+    font-size: 2rem; font-weight: 800; letter-spacing: .06em;
+    background: linear-gradient(90deg, #7ea2ff, #b9a5ff);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .brand .tag { color: var(--muted); font-size: .82rem; margin-top: 2px; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 18px; padding: 26px; box-shadow: 0 20px 60px rgba(0,0,0,.45);
+  }
+
+  /* ---- status pill ---- */
+  .pill {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    font-size: .78rem; letter-spacing: .04em; padding: 7px 14px;
+    border-radius: 999px; margin-bottom: 20px; user-select: none;
+    border: 1px solid var(--line); color: var(--muted); width: fit-content;
+    margin-left: auto; margin-right: auto;
+  }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .pill.on  { color: var(--good); border-color: #1c4a33; }
+  .pill.on  .dot { background: var(--good); box-shadow: 0 0 8px var(--good);
+                   animation: pulse 2s infinite; }
+  .pill.off { color: var(--warn); border-color: #4a3a1c; }
+  .pill.off .dot { background: var(--warn); }
+  @keyframes pulse { 50% { opacity: .45; } }
+
+  /* ---- steps indicator ---- */
+  .steps { display: flex; gap: 6px; margin-bottom: 22px; }
+  .steps .step {
+    flex: 1; height: 5px; border-radius: 3px; background: var(--line);
+    transition: background .4s;
+  }
+  .steps .step.done  { background: var(--accent); }
+  .steps .step.live  { background: var(--accent); animation: pulse 1.2s infinite; }
+
+  label { display: block; font-size: .82rem; color: var(--muted); margin-bottom: 7px; }
+  .inputwrap { position: relative; }
+  .inputwrap .plus {
+    position: absolute; left: 13px; top: 50%; transform: translateY(-50%);
+    color: var(--muted); font-size: 1rem; pointer-events: none;
+  }
+  input {
+    width: 100%; padding: 13px 14px 13px 32px; border-radius: 11px;
+    border: 1px solid var(--line); background: var(--card2);
+    color: var(--text); font-size: 1.02rem; outline: none;
+    transition: border-color .2s;
+  }
+  input:focus { border-color: var(--accent); }
+  input::placeholder { color: #5a5f75; }
+
+  button {
+    width: 100%; margin-top: 12px; padding: 13px; border: 0;
+    border-radius: 11px; font-size: .95rem; font-weight: 700;
+    cursor: pointer; transition: transform .1s, opacity .2s;
+  }
+  button:active { transform: scale(.985); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .btn-main { background: var(--accent); color: #fff; }
+  .btn-sec  { background: var(--card2); color: var(--text);
+              border: 1px solid var(--line); margin-top: 8px; }
+
+  .hint { font-size: .75rem; color: var(--muted); text-align: center; margin-top: 10px; line-height: 1.5; }
+
+  .hidden { display: none !important; }
+
+  /* ---- code display ---- */
+  .codecard {
+    margin-top: 18px; background: var(--card2); border: 1px dashed #343a56;
+    border-radius: 14px; padding: 20px 16px; text-align: center;
+  }
+  .codecard .label { font-size: .74rem; color: var(--muted);
+                    letter-spacing: .08em; margin-bottom: 10px; }
+  .codecard .code {
+    font-family: 'Cascadia Mono', ui-monospace, Menlo, monospace;
+    font-size: 1.75rem; font-weight: 700; letter-spacing: .14em;
+    color: #7ee08a; user-select: all; word-break: break-all; line-height: 1.3;
+  }
+  .codecard .countdown {
+    margin-top: 10px; font-size: .8rem; color: var(--warn);
+    font-variant-numeric: tabular-nums;
+  }
+  .codecard .countdown.expired { color: var(--bad); }
+  .codecard .countdown.ok { color: var(--muted); }
+
+  /* ---- status line / spinner ---- */
+  .live {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    margin: 20px 0 4px; font-size: .9rem; color: var(--text); min-height: 24px;
+    text-align: center;
+  }
+  .spin {
+    width: 16px; height: 16px; border-radius: 50%;
+    border: 2px solid var(--line); border-top-color: var(--accent);
+    animation: rot .8s linear infinite; flex: none;
+  }
+  @keyframes rot { to { transform: rotate(360deg); } }
+
+  .errbox {
+    margin-top: 14px; background: #2b161a; border: 1px solid #5a2b31;
+    color: #f4a9a9; border-radius: 11px; padding: 13px;
+    font-size: .85rem; line-height: 1.5; text-align: center;
+  }
+
+  .success {
+    margin-top: 18px; text-align: center; padding: 26px 10px;
+  }
+  .success .big { font-size: 3rem; margin-bottom: 10px; }
+  .success h2 { font-size: 1.15rem; margin-bottom: 6px; }
+  .success p  { font-size: .85rem; color: var(--muted); line-height: 1.6; }
+
+  /* ---- QR ---- */
+  .qrbox { text-align: center; margin: 18px 0 4px; }
+  .qrbox img {
+    width: 250px; height: 250px; border-radius: 14px; background: #fff;
+    padding: 10px; display: block; margin: 0 auto 10px;
+  }
+  .qrbox .cap { font-size: .8rem; color: var(--muted); line-height: 1.5; }
+
+  footer {
+    text-align: center; margin-top: 18px; color: #565c72;
+    font-size: .72rem;
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="brand">
+    <div class="logo">⚡ BOLTIX</div>
+    <div class="tag">WhatsApp pairing panel</div>
+  </div>
+
+  <div class="card">
+    <div id="pill" class="pill"><span class="dot"></span><span id="pillText">checking…</span></div>
+
+    <div class="steps" id="steps">
+      <div class="step" id="st1"></div>
+      <div class="step" id="st2"></div>
+      <div class="step" id="st3"></div>
+      <div class="step" id="st4"></div>
+    </div>
+
+    <!-- ===== FORM ===== -->
+    <div id="form">
+      <label for="number">Your WhatsApp number (with country code)</label>
+      <div class="inputwrap">
+        <span class="plus">+</span>
+        <input id="number" type="tel" inputmode="numeric" autocomplete="tel"
+               placeholder="2348123456789" maxlength="15">
+      </div>
+      <button id="pairBtn" class="btn-main">Get Pairing Code</button>
+    </div>
+
+    <!-- ===== CODE ===== -->
+    <div id="codeCard" class="codecard hidden">
+      <div class="label">PAIRING CODE</div>
+      <div id="code" class="code">••••-••••</div>
+      <div id="cd" class="countdown ok"></div>
+    </div>
+
+    <!-- ===== LIVE STATUS ===== -->
+    <div id="live" class="live hidden"><span class="spin"></span><span id="liveText"></span></div>
+
+    <!-- ===== QR FALLBACK ===== -->
+    <div id="qrbox" class="qrbox hidden">
+      <img id="qr" alt="QR code">
+      <div class="cap">Prefer scanning? Open WhatsApp →<br><b>Settings → Linked devices → Link a device</b></div>
+    </div>
+
+    <!-- ===== ERROR ===== -->
+    <div id="errbox" class="errbox hidden"></div>
+
+    <!-- ===== SUCCESS ===== -->
+    <div id="success" class="success hidden">
+      <div class="big">✅</div>
+      <h2>Device linked!</h2>
+      <p>The bot is connecting with your account.<br>You can close this page now.</p>
+    </div>
+
+    <button id="cancelBtn" class="btn-sec hidden">Cancel pairing</button>
+    <button id="retryBtn" class="btn-sec hidden">Try again</button>
+
+    <div class="hint">
+      Enter the code in WhatsApp: <b>Settings → Linked devices →<br>Link a device → Link with phone number instead</b>
+    </div>
+  </div>
+
+  <footer>BOLTIX • pairing via device code or QR</footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+/* ---------- UI state helpers ---------- */
+function show(id)  { $(id).classList.remove('hidden'); }
+function hide(id)  { $(id).classList.add('hidden'); }
+function setPill(text, on) {
+  $('pillText').textContent = text;
+  const p = $('pill');
+  p.classList.toggle('on', on === true);
+  p.classList.toggle('off', on === false);
+}
+function setLive(text) { if (text === null) { hide('live'); return; } $('liveText').textContent = text; show('live'); }
+function setSteps(stage) {
+  // stage: 0 none, 1 requested, 2 code ready, 3 linking, 4 done
+  ['st1','st2','st3','st4'].forEach((id, i) => {
+    const el = $(id);
+    el.className = 'step' + (i + 1 < stage ? ' done' : i + 1 === stage ? ' live' : '');
+  });
+}
+function showError(msg) { $('errbox').textContent = msg; show('errbox'); }
+function clearError()  { hide('errbox'); }
+
+function resetFlow() {
+  hide('codeCard'); hide('live'); hide('errbox'); hide('success');
+  hide('cancelBtn'); hide('retryBtn'); hide('qrbox');
+  setLive(null); clearError(); setSteps(0);
+  show('form');
+}
+
+/* ---------- countdown ---------- */
+let cdTimer = null;
+function startCountdown(expiresInSec) {
+  stopCountdown();
+  show('codeCard');
+  const tick = () => {
+    const r = $('apiState') ? 0 : 0; // noop
+    let left = Math.max(0, expiresAtLocal - Date.now());
+    const sec = Math.floor(left / 1000);
+    if (sec <= 0) {
+      $('cd').textContent = 'Code expired — waiting for a fresh one…';
+      $('cd').className = 'countdown expired';
+      stopCountdown();
+      return;
+    }
+    const m = String(Math.floor(sec / 60)).padStart(2, '0');
+    const s = String(sec % 60).padStart(2, '0');
+    $('cd').textContent = `Expires in ${m}:${s}`;
+    $('cd').className = 'countdown ' + (sec < 60 ? '' : 'ok');
+  };
+  expiresAtLocal = Date.now() + expiresInSec * 1000;
+  tick();
+  cdTimer = setInterval(tick, 1000);
+}
+let expiresAtLocal = 0;
+function stopCountdown() { if (cdTimer) { clearInterval(cdTimer); cdTimer = null; } }
+
+/* ---------- global state polling ---------- */
+let statePoller = setInterval(refreshState, 3000);
+async function refreshState() {
+  try {
+    const r = await fetch('/api/state', { cache: 'no-store' });
+    const s = await r.json();
+    setPill(s.connected
+      ? 'ONLINE — ' + (s.user || 'bot account')
+      : (s.state === 'pairing' ? 'PAIRING IN PROGRESS' : (s.state || 'offline').toUpperCase()),
+      s.connected);
+
+    if (s.connected && !pairingId) {
+      // Bot already linked — show the success state directly.
+      hide('form'); hide('qrbox');
+      show('success'); setSteps(4);
+      return;
+    }
+    if (pairingId) return; // a flow is running; state handled by pair poller
+
+    // Not connected and no flow: offer QR when the server has one.
+    if (s.state === 'waiting_qr') {
+      try {
+        const rq = await fetch('/api/qr', { cache: 'no-store' });
+        const q = await rq.json();
+        if (q.qr) { $('qr').src = q.qr; show('qrbox'); }
+        else hide('qrbox');
+      } catch {}
+    } else {
+      hide('qrbox');
+    }
+  } catch { setPill('SERVER UNREACHABLE', false); }
+}
+
+/* ---------- pairing flow ---------- */
+let pairingId = null;
+let pairPoller = null;
+
+function startPairPolling() {
+  stopPairPolling();
+  pairPoller = setInterval(pollPair, 2000);
+}
+function stopPairPolling() { if (pairPoller) { clearInterval(pairPoller); pairPoller = null; } }
+
+async function pollPair() {
+  if (!pairingId) return;
+  try {
+    const r = await fetch('/api/pair/status?id=' + encodeURIComponent(pairingId), { cache: 'no-store' });
+    if (!r.ok) { if (r.status === 404) { stopPairPolling(); pairingId = null; } return; }
+    const s = await r.json();
+
+    switch (s.state) {
+      case 'code_ready':
+        clearError();
+        $('code').textContent = s.code;
+        setSteps(2);
+        setLive(null);
+        if (typeof s.expiresIn === 'number') startCountdown(s.expiresIn);
+        show('cancelBtn');
+        break;
+
+      case 'restarting':
+        clearError(); stopCountdown(); hide('codeCard');
+        setSteps(1);
+        setLive('Code expired — getting a fresh one…');
+        break;
+
+      case 'linking':
+        clearError(); stopCountdown(); hide('codeCard');
+        setSteps(3);
+        setLive('Code accepted — linking your device…');
+        hide('cancelBtn');
+        break;
+
+      case 'open':
+        stopCountdown(); stopPairPolling();
+        setSteps(4); setLive(null); hide('codeCard'); hide('cancelBtn');
+        clearError();
+        show('success');
+        pairingId = null;
+        setPill('ONLINE — linked', true);
+        break;
+
+      case 'failed':
+        stopCountdown(); stopPairPolling();
+        setSteps(0); setLive(null); hide('codeCard'); hide('cancelBtn');
+        showError(s.error || 'Pairing failed. Please try again.');
+        show('retryBtn');
+        pairingId = null;
+        break;
+
+      case 'cancelled':
+        stopCountdown(); stopPairPolling();
+        setSteps(0); setLive(null); hide('codeCard'); hide('cancelBtn');
+        pairingId = null;
+        resetFlow();
+        break;
+    }
+  } catch {}
+}
+
+$('pairBtn').addEventListener('click', async () => {
+  const number = $('number').value.replace(/\D/g, '');
+  if (number.length < 10 || number.length > 15) {
+    showError('Enter your full number with country code, digits only (e.g. 2348123456789).');
+    return;
+  }
+
+  clearError(); hide('form'); hide('qrbox'); hide('retryBtn');
+  setSteps(1);
+  setLive('Requesting pairing code…');
+  $('pairBtn').disabled = true;
+
+  try {
+    const r = await fetch('/api/pair?number=' + encodeURIComponent(number));
+    const s = await r.json();
+    if (!r.ok || !s.ok) throw new Error(s.error || ('HTTP ' + r.status));
+
+    pairingId = s.pairingId;
+    $('code').textContent = s.code;
+    setSteps(2); setLive(null);
+    show('cancelBtn');
+
+    // The server may already have stamped a TTL on the status entry.
+    startPairPolling();
+    // Seed an optimistic 5-minute countdown until the first poll confirms it.
+    startCountdown(5 * 60);
+  } catch (e) {
+    showError('' + e.message);
+    setSteps(0); setLive(null);
+    show('form'); show('retryBtn');
+  } finally {
+    $('pairBtn').disabled = false;
+  }
+});
+
+$('cancelBtn').addEventListener('click', async () => {
+  const id = pairingId;
+  if (id) { try { await fetch('/api/pair/cancel?id=' + encodeURIComponent(id)); } catch {} }
+  pairingId = null;
+  stopPairPolling(); stopCountdown();
+  resetFlow();
+});
+
+$('retryBtn').addEventListener('click', () => {
+  hide('retryBtn');
+  clearError();
+  resetFlow();
+});
+
+refreshState();
+</script>
+</body>
+</html>
